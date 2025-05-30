@@ -24,14 +24,14 @@ async function updateData(){
     const browser = await puppeteer.launch({
       headless: true,
       args: [
-        '--no-sandbox', 
+        '--no-sandbox',
         '--disable-setuid-sandbox',
         '--disable-dev-shm-usage',
         '--disable-gpu',
         '--disable-features=VizDisplayCompositor'
       ]
     });
-  
+
   const page = await browser.newPage();
 
   await page.goto('https://gestiondocente.info.unlp.edu.ar/cartelera/data/0/10', {
@@ -54,7 +54,7 @@ async function updateData(){
   }
 }
 
-
+let pendientesDeEnvio = []; // almaceno por si ocurre un error al enviar
 let avisosEnviados = new Set(); // el set no admite duplicados, por lo que es ideal para almacenar los avisos enviados
 
 function cargarEnviados() {
@@ -112,7 +112,7 @@ function getNuevosAvisosDelDia(data) {
 async function enviarAlCanal(aviso, canalId) {
   try {
     const texto = `📌 *${aviso.materia}* - ${aviso.titulo}\n🗓️ ${aviso.fecha}\n🧑‍🏫 ${aviso.autor}\n📝 ${aviso.cuerpo}`;
-    await axios.post('http://192.168.126.111:3000/api/sendText', {
+    await axios.post('http://192.168.249.111:3000/api/sendText', {
       chatId: canalId,
       text: texto,
       session: 'default'
@@ -123,13 +123,14 @@ async function enviarAlCanal(aviso, canalId) {
     console.log(`Aviso enviado: ${aviso.titulo}`);
   } catch (error) {
     console.error('Error al enviar aviso al canal:', error.message);
+    pendientesDeEnvio.push({ aviso, canalId, intentos: 1 }); //guardo los datos del aviso que no se pudo enviar
   }
 }
 
 async function revisarYEnviarNuevos(data, canalId) {
   const nuevos = getNuevosAvisosDelDia(data);
   console.log(`Encontrados ${nuevos.length} avisos nuevos`);
-  
+
   for (const aviso of nuevos) {
     await enviarAlCanal(aviso, canalId);
     // Pequeña pausa entre envíos para no saturar
@@ -143,6 +144,33 @@ app.use((req, res, next) => {
   console.log(`${new Date().toISOString()} - ${req.method} ${req.path}`);
   next();
 });
+//intervalo para reintentar envíos fallidos
+setInterval(async () => {
+  if (pendientesDeEnvio.length === 0) return;
+
+  console.log(`Intentando reenviar ${pendientesDeEnvio.length} avisos pendientes...`);
+  
+  const pendientesRestantes = [];
+
+  for (const item of pendientesDeEnvio) {
+    try {
+      await enviarAlCanal(item.aviso, item.canalId);
+      // Si se envía correctamente, no se vuelve a agregar
+    } catch (error) {
+      // ===========por ahora saco el manejo de intentos múltiples===========
+      // Si vuelve a fallar, lo agregamos nuevamente si no superó un límite de intentos
+      /*item.intentos++;
+      if (item.intentos <= 5) {
+        pendientesRestantes.push(item);
+      } else {
+        console.warn(`Aviso descartado tras múltiples intentos: ${item.aviso.titulo}`);
+      }
+        */
+    }
+    await new Promise(resolve => setTimeout(resolve, 1000)); // espera entre intentos
+  }
+  pendientesDeEnvio = pendientesRestantes; // vuelvo a cargar los que dieron error de vuelta, aunque no deberia pasar
+}, 60 * 1000); // reintentar cada 1 minuto
 
 // inicializo sistema
 cargarEnviados();
@@ -163,15 +191,15 @@ async function inicializar() {
         console.error('Error en actualización periódica:', error);
       }
     }, 5 * 60 * 1000);
-    
+
     console.log('Sistema inicializado correctamente');
   } catch (error) {
     console.error('Error al inicializar:', error);
   }
 }
 
-// Inicializar después de un breve delay para asegurar que el servidor esté listo
-setTimeout(inicializar, 2000);
+// Inicializar después de 5 minutos de delay para asegurar que el servidor esté listo y se incie waha
+setTimeout(inicializar, 300000);
 
 app.get('/cartelera', async (req, res) => {
   try {
@@ -179,13 +207,13 @@ app.get('/cartelera', async (req, res) => {
 
     let filteredData = [...cacheData]; // pongo los datos de caché en filteredData
     if (materia) {
-      filteredData = filteredData.filter(m => 
+      filteredData = filteredData.filter(m =>
         m.materia.toLowerCase().includes(materia.toLowerCase())
       );
     }
 
      if (fecha) {
-      filteredData = filteredData.filter(m => 
+      filteredData = filteredData.filter(m =>
         m.fecha.startsWith(fecha) // busca por fecha (formato DD/MM/AAAA)
       );
     }
@@ -196,13 +224,13 @@ app.get('/cartelera', async (req, res) => {
       ultimaActualizacion: ultimaVez,
       datos: cleanData
     });
-    
+
 
   } catch (error) {
     console.error('Error:', error);
-    res.status(500).json({ 
+    res.status(500).json({
       error: error.message,
-      details: 'Ocurrió un error al obtener los datos de la cartelera' 
+      details: 'Ocurrió un error al obtener los datos de la cartelera'
     });
   }
 });
